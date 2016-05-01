@@ -75,7 +75,6 @@ type Item struct {
 	Value      []byte
 	Flags      uint32
 	Exporation int32
-	casid      uint64
 }
 
 func New(servers ...string) *GoClient {
