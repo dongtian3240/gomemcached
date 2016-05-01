@@ -2,8 +2,11 @@ package gomemcached
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"net"
 	"sync"
 	"time"
@@ -43,8 +46,14 @@ var (
 
 var (
 	CTRL              = []byte("\r\n")
-	RESULT_NOT_STORED = "NOT_STORED\r\n"
-	RESULT_STORED     = "STORED\r\n"
+	SPACE             = []byte(" ")
+	RESULT_NOT_STORED = []byte("NOT_STORED\r\n")
+
+	RESULT_STORED = []byte("STORED\r\n")
+
+	RESULT_NOT_FOUND = []byte("NOT_FOUND\r\n")
+
+	RESULT_END = []byte("END\r\n")
 )
 
 type GoClient struct {
@@ -256,17 +265,84 @@ func (gc *GoClient) parseStorePostAndResponse(command string, rw *bufio.ReadWrit
 		return err
 	}
 	fmt.Println(string(line))
-	switch string(line) {
+	switch {
 
-	case RESULT_STORED:
+	case bytes.Equal(RESULT_STORED, line):
 		return nil
-	case RESULT_NOT_STORED:
+	case bytes.Equal(RESULT_NOT_STORED, line):
 		return ErrNotStored
+	case bytes.Equal(RESULT_NOT_FOUND, line):
+		return ErrCacheMiss
 
 	}
 	return fmt.Errorf("%s", string(line))
 
 }
+
+// give a key
+func (gc *GoClient) Get(key string) (*Item, error) {
+
+	addr, err := gc.goServer.PickServer(key)
+	if err != nil {
+		return nil, err
+	}
+
+	gconn, err := gc.getGoConn(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	defer gconn.condRelease(err)
+
+	_, err = fmt.Fprintf(gconn.rw, "get %s%s", key, CTRL)
+	if err != nil {
+		return nil, err
+	}
+
+	err = gconn.rw.Flush()
+	if err != nil {
+		return nil, err
+	}
+
+	line, err := gconn.rw.ReadSlice('\n')
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println("=result ===", string(line))
+
+	var flags uint32
+	var size uint32
+	_, err = fmt.Sscanf(string(line), "VALUE %s %d %d\r\n", &key, &flags, &size)
+	fmt.Printf("key = %s flags = %d size= %d", key, flags, size)
+
+	vas, err := ioutil.ReadAll(io.LimitReader(gconn.rw.Reader, int64(size)+2))
+	fmt.Println("vas =", string(vas))
+	if err != nil {
+		return nil, err
+	}
+
+	if !bytes.HasSuffix(vas, CTRL) {
+		return nil, fmt.Errorf("error bad result ....")
+	}
+
+	val := vas[:size]
+	item := &Item{
+		Key:   key,
+		Value: val,
+		Flags: flags,
+	}
+
+	line, err = gconn.rw.ReadSlice('\n')
+
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Println("result =", string(line))
+
+	return item, nil
+}
+
 func resumeableError(err error) bool {
 	if err == nil {
 		return true
@@ -276,6 +352,5 @@ func resumeableError(err error) bool {
 	case ErrCacheMiss, ErrNotStored, ErrCASConflict, ErrMalformedKey:
 		return true
 	}
-
 	return false
 }

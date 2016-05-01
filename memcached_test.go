@@ -1,6 +1,7 @@
 package gomemcached
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -11,9 +12,9 @@ func TestMemcached(t *testing.T) {
 	gc := New("127.0.0.1:11211")
 	item := &Item{
 		Key:        "dog",
-		Value:      []byte("动态"),
+		Value:      []byte("小狗"),
 		Flags:      0,
-		Exporation: 60,
+		Exporation: 6000,
 	}
 	err := gc.Add(item)
 	t.Log("err = ", err)
@@ -27,4 +28,6 @@ func TestMemcached(t *testing.T) {
 
 	err = gc.Set(item)
 	t.Log(" set err = ", err)
+	it, err := gc.Get("dog")
+	fmt.Println(string(it.Value), err)
 }
