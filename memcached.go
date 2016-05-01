@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
+	"net/rpc"
 	"sync"
 	"time"
 )
@@ -78,7 +79,6 @@ type Item struct {
 }
 
 func New(servers ...string) *GoClient {
-
 	goServer := new(GoServer)
 	goServer.SetServers(servers...)
 	return &GoClient{
