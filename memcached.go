@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
-	"net/rpc"
 	"sync"
 	"time"
 )
@@ -54,7 +53,8 @@ var (
 
 	RESULT_NOT_FOUND = []byte("NOT_FOUND\r\n")
 
-	RESULT_END = []byte("END\r\n")
+	RESULT_END       = []byte("END\r\n")
+	RESULT_DELETE_OK = []byte("DELETED\r\n")
 )
 
 type GoClient struct {
@@ -281,6 +281,13 @@ func (gc *GoClient) parseStorePostAndResponse(command string, rw *bufio.ReadWrit
 // give a key
 func (gc *GoClient) Get(key string) (*Item, error) {
 
+	gconn, err := gc.getGoConnWithKey(key)
+	defer gconn.condRelease(err)
+	return gc.parseGetResponse(gconn.rw, key)
+
+}
+
+func (gc *GoClient) getGoConnWithKey(key string) (*GoConn, error) {
 	addr, err := gc.goServer.PickServer(key)
 	if err != nil {
 		return nil, err
@@ -290,20 +297,21 @@ func (gc *GoClient) Get(key string) (*Item, error) {
 	if err != nil {
 		return nil, err
 	}
+	return gconn, nil
+}
 
-	defer gconn.condRelease(err)
-
-	_, err = fmt.Fprintf(gconn.rw, "get %s%s", key, CTRL)
+func (gc *GoClient) parseGetResponse(rw *bufio.ReadWriter, key string) (*Item, error) {
+	_, err := fmt.Fprintf(rw, "get %s%s", key, CTRL)
 	if err != nil {
 		return nil, err
 	}
 
-	err = gconn.rw.Flush()
+	err = rw.Flush()
 	if err != nil {
 		return nil, err
 	}
 
-	line, err := gconn.rw.ReadSlice('\n')
+	line, err := rw.ReadSlice('\n')
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +322,7 @@ func (gc *GoClient) Get(key string) (*Item, error) {
 	_, err = fmt.Sscanf(string(line), "VALUE %s %d %d\r\n", &key, &flags, &size)
 	fmt.Printf("key = %s flags = %d size= %d", key, flags, size)
 
-	vas, err := ioutil.ReadAll(io.LimitReader(gconn.rw.Reader, int64(size)+2))
+	vas, err := ioutil.ReadAll(io.LimitReader(rw.Reader, int64(size)+2))
 	fmt.Println("vas =", string(vas))
 	if err != nil {
 		return nil, err
@@ -331,7 +339,7 @@ func (gc *GoClient) Get(key string) (*Item, error) {
 		Flags: flags,
 	}
 
-	line, err = gconn.rw.ReadSlice('\n')
+	line, err = rw.ReadSlice('\n')
 
 	if err != nil {
 		return nil, err
@@ -342,6 +350,149 @@ func (gc *GoClient) Get(key string) (*Item, error) {
 	return item, nil
 }
 
+func (gc *GoClient) responseScanLine(item *Item, line []byte) (int, error) {
+	fmt.Println("=result ===", string(line))
+	pattern := "VALUE %s %d %d\r\n"
+	var key string
+	var flags uint32
+	var size uint32
+	n, err := fmt.Sscanf(string(line), pattern, &key, &flags, &size)
+	if err != nil {
+		return 0, err
+	}
+	fmt.Printf("key = %s flags = %d size= %d", key, flags, size)
+	item.Key = key
+	item.Flags = flags
+
+	return n, nil
+
+}
+
+/***
+   delete
+**/
+func (gc *GoClient) Delete(key string) error {
+
+	goconn, err := gc.getGoConnWithKey(key)
+	if err != nil {
+		return err
+	}
+	defer goconn.condRelease(err)
+
+	_, err = fmt.Fprintf(goconn.rw, "delete %s %d\r\n", key, 0)
+	if err != nil {
+		return err
+	}
+
+	goconn.rw.Flush()
+
+	line, err := goconn.rw.ReadSlice('\n')
+	if err != nil {
+		return err
+	}
+	switch {
+	case bytes.Equal(RESULT_DELETE_OK, line):
+		return nil
+	case bytes.Equal(RESULT_NOT_FOUND, line):
+		return fmt.Errorf(string(RESULT_NOT_FOUND))
+	}
+
+	return fmt.Errorf(err.Error())
+
+}
+
+/***
+  flush_all
+**/
+func (gc *GoClient) FlushAll() error {
+
+	return gc.goServer.Each(func(addr net.Addr) error {
+
+		goconn, err := gc.getGoConn(addr)
+		if err != nil {
+			return err
+		}
+		defer goconn.condRelease(err)
+
+		_, err = goconn.rw.Write([]byte("flush_all"))
+
+		if err != nil {
+			return err
+		}
+
+		err = goconn.rw.Flush()
+		if err != nil {
+			return err
+		}
+
+		return nil
+
+	})
+
+}
+
+/*
+  incr
+*/
+func (gc *GoClient) Incr(key string, step uint32) (uint32, error) {
+
+	goconn, err := gc.getGoConnWithKey(key)
+	if err != nil {
+		return 0, err
+	}
+
+	defer goconn.condRelease(err)
+	return gc.responseIncrAndDecr(key, step, goconn.rw, "incr")
+
+}
+
+func (gc *GoClient) Decr(key string, step uint32) (uint32, error) {
+
+	goconn, err := gc.getGoConnWithKey(key)
+	if err != nil {
+		return 0, err
+	}
+
+	defer goconn.condRelease(err)
+	return gc.responseIncrAndDecr(key, step, goconn.rw, "decr")
+
+}
+
+func (gc *GoClient) responseIncrAndDecr(key string, step uint32, rw *bufio.ReadWriter, command string) (uint32, error) {
+
+	_, err := fmt.Fprintf(rw, "%s %s %d\r\n", command, key, step)
+	if err != nil {
+		return 0, err
+
+	}
+	err = rw.Flush()
+	if err != nil {
+		return 0, err
+	}
+
+	line, err := rw.ReadSlice('\n')
+	fmt.Println("incr line=", string(line))
+	if err != nil {
+		return 0, err
+	}
+
+	switch {
+	case bytes.Equal(RESULT_NOT_FOUND, line):
+		return 0, fmt.Errorf(string(RESULT_NOT_FOUND))
+
+	}
+	var res uint32
+	_, err = fmt.Sscanf(string(line), "%d\r\n", &res)
+	fmt.Println("res = ", res)
+	if err != nil {
+		return 0, err
+	}
+	return res, nil
+}
+
+/***
+  resume error
+**/
 func resumeableError(err error) bool {
 	if err == nil {
 		return true

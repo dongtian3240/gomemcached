@@ -30,4 +30,14 @@ func TestMemcached(t *testing.T) {
 	t.Log(" set err = ", err)
 	it, err := gc.Get("dog")
 	fmt.Println(string(it.Value), err)
+
+	is := &Item{
+		Key:   "num",
+		Value: []byte("2"),
+	}
+	gc.Add(is)
+
+	v, err := gc.Incr("num", 100)
+	fmt.Println("v=", v, "err=", err)
+
 }

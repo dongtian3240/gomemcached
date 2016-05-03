@@ -14,6 +14,7 @@ var (
 
 type Selector interface {
 	PickServer(key string) (net.Addr, error)
+	Each(func(net.Addr) error) error
 }
 
 type GoServer struct {
@@ -66,4 +67,20 @@ func (gs *GoServer) SetServers(servers ...string) error {
 
 	gs.addrs = naddr
 	return nil
+}
+
+func (gs *GoServer) Each(fn func(net.Addr) error) error {
+
+	gs.lk.Lock()
+	defer gs.lk.Unlock()
+
+	for _, addr := range gs.addrs {
+
+		err := fn(addr)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+
 }
